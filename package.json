@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "npx prisma db push && node server.js"
+    "start": "npx prisma generate && npx prisma db push && node server.js"
   },
   "dependencies": {
     "@prisma/client": "^5.10.0",

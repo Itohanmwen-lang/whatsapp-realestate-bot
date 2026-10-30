@@ -1,5 +1,5 @@
-import express from 'express';
-import axios from 'axios';
+const express = require('express');
+const axios = require('axios');
 
 const app = express();
 app.use(express.json());
@@ -13,7 +13,10 @@ app.get('/webhook', (req, res) => {
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  if (mode === 'subscribe' && token === WEBHOOK_VERIFY_TOKEN) {
+  // Accept token check against process.env or fallback token
+  const validToken = WEBHOOK_VERIFY_TOKEN || 'my_secret_token_000';
+
+  if (mode === 'subscribe' && token === validToken) {
     console.log('Webhook successfully verified!');
     return res.status(200).send(challenge);
   }
@@ -22,21 +25,33 @@ app.get('/webhook', (req, res) => {
 
 // Incoming Message Handler
 app.post('/webhook', async (req, res) => {
+  // Always return 200 immediately so Meta doesn't time out
   res.sendStatus(200);
 
-  const entry = req.body.entry?.[0];
-  const changes = entry?.changes?.[0];
-  const message = changes?.value?.messages?.[0];
+  try {
+    const entry = req.body.entry?.[0];
+    const changes = entry?.changes?.[0];
+    const message = changes?.value?.messages?.[0];
 
-  if (!message) return;
+    if (!message) return;
 
-  const from = message.from;
-  const messageText = message.text?.body || '';
+    const from = message.from;
+    const messageText = message.text?.body || '';
 
-  await sendWhatsAppMessage(from, `Hello! Thanks for reaching out to Apex Realty. We received your message: "${messageText}". An agent will assist you shortly.`);
+    console.log(`Received message from ${from}: ${messageText}`);
+
+    await sendWhatsAppMessage(from, `Hello! Thanks for reaching out to Apex Realty. We received your message: "${messageText}". An agent will assist you shortly.`);
+  } catch (err) {
+    console.error('Error processing webhook event:', err.message);
+  }
 });
 
 async function sendWhatsAppMessage(to, text) {
+  if (!PHONE_NUMBER_ID || !WHATSAPP_TOKEN) {
+    console.error('Missing PHONE_NUMBER_ID or WHATSAPP_TOKEN in environment variables.');
+    return;
+  }
+
   try {
     await axios.post(
       `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
@@ -50,6 +65,7 @@ async function sendWhatsAppMessage(to, text) {
         headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
       }
     );
+    console.log(`Message successfully sent to ${to}`);
   } catch (err) {
     console.error('WhatsApp Send Error:', err.response?.data || err.message);
   }

@@ -1,106 +1,107 @@
-import express from 'express';
-import axios from 'axios';
-import { PrismaClient } from '@prisma/client';
+const express = require('express');
+const axios = require('axios');
+const { PrismaClient } = require('@prisma/client');
 
 const prisma = new PrismaClient();
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 10000;
-const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN || 'my_secret_token_000';
-
+// 1. Webhook Verification (Meta setup)
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  if (mode === 'subscribe' && token === WEBHOOK_VERIFY_TOKEN) {
+  if (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
     return res.status(200).send(challenge);
   }
-  return res.sendStatus(403);
+  res.sendStatus(403);
 });
 
+// 2. Incoming Messages Listener
 app.post('/webhook', async (req, res) => {
-  res.sendStatus(200);
+  res.sendStatus(200); // Immediate 200 OK for Meta
 
   try {
     const entry = req.body.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const value = changes?.value;
-    const message = value?.messages?.[0];
+    const change = entry?.changes?.[0]?.value;
+    const message = change?.messages?.[0];
+    
+    if (!message || message.type !== 'text') return;
 
-    if (!message) return;
+    const metadata = change.metadata;
+    const phoneNumberId = metadata.phone_number_id;
+    const fromPhone = message.from;
+    const userText = message.text.body.trim().toLowerCase();
 
-    const incomingPhoneNumberId = value.metadata?.phone_number_id;
-    const leadPhone = message.from;
-    const messageText = (message.text?.body || '').trim().toLowerCase();
-
-    // 1. Fetch Agent matching this WhatsApp Phone Number ID
+    // Fetch matching Agent from Supabase
     const agent = await prisma.agent.findUnique({
-      where: { phoneNumberId: incomingPhoneNumberId },
-      include: { properties: true }
+      where: { phoneNumberId: phoneNumberId }
     });
 
     if (!agent || !agent.whatsappAccessToken) {
-      console.error(`No agent or token found for ID: ${incomingPhoneNumberId}`);
+      console.log(`No active agent found for Phone Number ID: ${phoneNumberId}`);
       return;
     }
 
-    // 2. Log Lead
-    await prisma.lead.upsert({
-      where: { id: `${agent.id}_${leadPhone}` },
-      update: {},
-      create: {
-        id: `${agent.id}_${leadPhone}`,
-        agentId: agent.id,
-        phone: leadPhone
-      }
-    });
+    // Process intent & build response
+    let responseText = "";
 
-    // 3. Dynamic Response Logic
-    let responseText = `Hello! Welcome to *${agent.name}* Real Estate Services.\n\nReply with *1* to see available property listings.`;
+    if (userText.includes("inspection") || userText.includes("book") || userText.includes("agent")) {
+      // Record lead in Supabase
+      await prisma.lead.create({
+        data: {
+          agentId: agent.id,
+          phone: fromPhone,
+          name: change.contacts?.[0]?.profile?.name || "WhatsApp User"
+        }
+      });
 
-    if (messageText === '1') {
-      if (agent.properties.length === 0) {
-        responseText = "We currently have no properties available. Please check back later!";
+      responseText = `Thanks! Your inspection request has been logged. ${agent.name} will reach out to you directly at this number shortly.`;
+
+    } else {
+      // Default: Fetch Agent's listings
+      const properties = await prisma.property.findMany({
+        where: { agentId: agent.id },
+        take: 5
+      });
+
+      if (properties.length === 0) {
+        responseText = `Welcome to ${agent.name}! We currently have no active listings available. Check back soon!`;
       } else {
-        responseText = "🏡 *Our Available Listings:*\n\n";
-        agent.properties.forEach((prop, index) => {
-          responseText += `${index + 1}. *${prop.title}*\n📍 ${prop.location}\n💰 ${prop.price}\n\n`;
+        let listingsText = `🏠 *Available Listings from ${agent.name}*\n\n`;
+        properties.forEach((prop, i) => {
+          listingsText += `*${i + 1}. ${prop.title}*\n`;
+          listingsText += `📍 Location: ${prop.location}\n`;
+          listingsText += `💰 Price: ${prop.price}\n`;
+          listingsText += `📝 ${prop.description}\n\n`;
         });
+        listingsText += `Reply *"INSPECTION"* to schedule a physical or virtual viewing!`;
+        responseText = listingsText;
       }
     }
 
-    // 4. Send WhatsApp Message
-    await sendWhatsAppMessage(
-      agent.phoneNumberId,
-      agent.whatsappAccessToken,
-      leadPhone,
-      responseText
+    // Reply back via WhatsApp Graph API
+    await axios.post(
+      `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        to: fromPhone,
+        type: 'text',
+        text: { body: responseText }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${agent.whatsappAccessToken}`,
+          'Content-Type': 'application/json'
+        }
+      }
     );
 
-  } catch (err) {
-    console.error('Webhook error:', err.message);
+  } catch (error) {
+    console.error('Webhook Error:', error.response?.data || error.message);
   }
 });
 
-async function sendWhatsAppMessage(phoneNumberId, token, to, text) {
-  try {
-    await axios.post(
-      `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        to,
-        type: 'text',
-        text: { body: text }
-      },
-      {
-        headers: { Authorization: `Bearer ${token}` }
-      }
-    );
-  } catch (err) {
-    console.error('Send message error:', err.response?.data || err.message);
-  }
-}
-
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Bot engine running on port ${PORT}`));
